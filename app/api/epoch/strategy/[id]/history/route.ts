@@ -1,62 +1,48 @@
-// app/api/strategy/[id]/history/route.ts
 import { NextResponse } from "next/server";
-import { getProvider, getEpochManager, EPOCH_MANAGER_ABI } from "../../../../../lib/epoch-manager";
-import { ethers } from "ethers";
+import { Interface } from "ethers";
+import { getBaseProvider } from "../../../../../lib/epoch-manager";
+import { EPOCH_MANAGER_ABI } from "../../../../../lib/epoch-manager.abi";
 
 export const dynamic = "force-dynamic";
 
-export async function GET(
-  req: Request,
-  { params }: { params: { id: string } }
-) {
+export async function GET(_: Request, { params }: { params: { id: string } }) {
   try {
     const strategyId = Number(params.id);
-    const { searchParams } = new URL(req.url);
-    const lookback = Number(searchParams.get("lookback") ?? "120000");
-    const limit = Math.min(50, Math.max(1, Number(searchParams.get("limit") ?? "20")));
+    if (!Number.isFinite(strategyId)) {
+      return NextResponse.json({ ok: false, error: "bad strategy id" }, { status: 400 });
+    }
 
-    const provider = getProvider();
-    const contract = getEpochManager();
-    const iface = new ethers.Interface(EPOCH_MANAGER_ABI as any);
+    const provider = getBaseProvider();
+    const epochManager = process.env.EPOCH_MANAGER!;
+    const iface = new Interface(EPOCH_MANAGER_ABI as any);
 
-    const latestBlock = await provider.getBlockNumber();
-    const fromBlock = Math.max(0, latestBlock - lookback);
+    const latest = await provider.getBlockNumber();
+    const fromBlock = Math.max(0, latest - 120_000); // أوسع شوي للهستوري
 
-    const topic = iface.getEvent("ProofScored").topicHash;
+    const eventFrag = iface.getEvent("ProofScored");
+    const topic0 = eventFrag.topicHash;
+    const topicStrategy = iface.encodeFilterTopics(eventFrag, [null, strategyId])[1];
 
     const logs = await provider.getLogs({
-      address: await contract.getAddress(),
+      address: epochManager,
       fromBlock,
-      toBlock: latestBlock,
-      topics: [
-        topic,
-        null,
-        ethers.zeroPadValue(ethers.toBeHex(strategyId), 32),
-      ],
+      toBlock: latest,
+      topics: [topic0, null, topicStrategy],
     });
 
-    const rows = logs
-      .slice(-limit)
-      .map((l) => {
-        const d = iface.decodeEventLog("ProofScored", l.data, l.topics);
-        return {
-          epochId: Number(d.epochId),
-          strategyId,
-          score: d.score?.toString?.() ?? String(d.score),
-          blockNumber: l.blockNumber,
-          txHash: l.transactionHash,
-        };
-      })
-      .reverse();
+    const rows = logs.map((log) => {
+      const parsed = iface.parseLog(log);
+      return {
+        epochId: Number(parsed.args.epochId),
+        strategyId: Number(parsed.args.strategyId),
+        score: parsed.args.score.toString(),
+        blockNumber: log.blockNumber,
+        txHash: log.transactionHash,
+      };
+    }).sort((a, b) => b.blockNumber - a.blockNumber);
 
-    return NextResponse.json(
-      { ok: true, strategyId, rows, fromBlock, toBlock: latestBlock },
-      { status: 200 }
-    );
+    return NextResponse.json({ ok: true, source: "onchain:ProofScored", fromBlock, toBlock: latest, rows }, { status: 200 });
   } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, error: e?.message ?? "error", rows: [] },
-      { status: 200 }
-    );
+    return NextResponse.json({ ok: false, error: e?.message ?? "offline", rows: [] }, { status: 200 });
   }
 }

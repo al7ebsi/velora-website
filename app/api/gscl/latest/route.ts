@@ -1,65 +1,37 @@
-// app/api/gscl/latest/route.ts
 import { NextResponse } from "next/server";
-import { getProvider, getEpochManager, EPOCH_MANAGER_ABI } from "../../../../lib/epoch-manager";
-import { ethers } from "ethers";
+import { getEpochManager } from "../../../../lib/epoch-manager";
 
 export const dynamic = "force-dynamic";
 
-export async function GET(req: Request) {
+export async function GET() {
   try {
-    const { searchParams } = new URL(req.url);
-    const strategyId = Number(searchParams.get("strategyId") ?? "2");
-    const lookback = Number(searchParams.get("lookback") ?? "50000");
+    const E = getEpochManager();
 
-    const provider = getProvider();
-    const contract = getEpochManager();
-    const iface = new ethers.Interface(EPOCH_MANAGER_ABI as any);
+    // آخر ~20,000 بلوك (عدلها لاحقاً)
+    const latest = await E.provider.getBlockNumber();
+    const from = Math.max(0, latest - 20_000);
 
-    const latestBlock = await provider.getBlockNumber();
-    const fromBlock = Math.max(0, latestBlock - lookback);
+    const logs = await E.queryFilter(E.filters.ProofScored(), from, latest);
+    const last = logs.at(-1);
 
-    const topic = iface.getEvent("ProofScored").topicHash;
-
-    const logs = await provider.getLogs({
-      address: await contract.getAddress(),
-      fromBlock,
-      toBlock: latestBlock,
-      topics: [
-        topic,
-        null,
-        ethers.zeroPadValue(ethers.toBeHex(strategyId), 32),
-      ],
-    });
-
-    if (!logs.length) {
-      return NextResponse.json(
-        { ok: true, found: false, strategyId },
-        { status: 200 }
-      );
+    if (!last) {
+      return NextResponse.json({ ok: true, found: false }, { status: 200 });
     }
 
-    const last = logs[logs.length - 1];
-    const decoded = iface.decodeEventLog("ProofScored", last.data, last.topics);
-
-    const epochId = Number(decoded.epochId);
-    const score = decoded.score?.toString?.() ?? String(decoded.score);
-
+    const { epochId, strategyId, score } = (last.args as any);
     return NextResponse.json(
       {
         ok: true,
         found: true,
-        strategyId,
-        epochId,
-        score,
-        blockNumber: last.blockNumber,
+        epochId: Number(epochId),
+        strategyId: Number(strategyId),
+        score: score.toString(), // uint256
         txHash: last.transactionHash,
+        blockNumber: last.blockNumber,
       },
       { status: 200 }
     );
   } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, error: e?.message ?? "error" },
-      { status: 200 }
-    );
+    return NextResponse.json({ ok: false, error: e?.message ?? "rpc_error" }, { status: 200 });
   }
 }

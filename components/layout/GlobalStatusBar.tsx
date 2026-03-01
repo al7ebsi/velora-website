@@ -11,40 +11,34 @@ type EpochView = {
 
 export default function GlobalStatusBar() {
   const [s, setS] = useState<EpochView>({ ok: false });
-  const lastOkAt = useRef<number>(0);
+  const failures = useRef(0);
+  const lastGood = useRef<EpochView | null>(null);
 
   useEffect(() => {
     let alive = true;
 
     async function load() {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 6000); // لا تخليه يطوّل
       try {
-        const r = await fetch("/api/epoch", {
-          cache: "no-store",
-          signal: controller.signal,
-        });
+        const r = await fetch("/api/epoch", { cache: "no-store" });
         const j = (await r.json()) as any;
+
         if (!alive) return;
 
-        const ok = !!j.ok;
-        if (ok) lastOkAt.current = Date.now();
+        if (j?.ok) {
+          failures.current = 0;
+          const next = { ok: true, epochIndex: j.epochIndex, epochEnd: j.epochEnd, timeLeft: j.timeLeft };
+          lastGood.current = next;
+          setS(next);
+          return;
+        }
 
-        // لو فشل الطلب الحالي لكن عندنا آخر نجاح قريب، خله Live
-        const recentlyOk = Date.now() - lastOkAt.current < 60_000;
-
-        setS({
-          ok: ok || recentlyOk,
-          epochIndex: j.epochIndex ?? s.epochIndex,
-          epochEnd: j.epochEnd ?? s.epochEnd,
-          timeLeft: j.timeLeft ?? s.timeLeft,
-        });
+        // server رجع ok=false
+        failures.current += 1;
+        if (failures.current >= 3) setS({ ok: false, ...lastGood.current });
       } catch {
         if (!alive) return;
-        const recentlyOk = Date.now() - lastOkAt.current < 60_000;
-        setS((prev) => ({ ...prev, ok: recentlyOk }));
-      } finally {
-        clearTimeout(timeout);
+        failures.current += 1;
+        if (failures.current >= 3) setS({ ok: false, ...lastGood.current });
       }
     }
 
@@ -54,7 +48,6 @@ export default function GlobalStatusBar() {
       alive = false;
       clearInterval(t);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
@@ -75,8 +68,8 @@ export default function GlobalStatusBar() {
 }
 
 function formatTime(sec?: number) {
-  if (sec == null) return "—";
-  const s = Math.max(0, Math.floor(sec));
+  if (!sec || sec <= 0) return "—";
+  const s = Math.floor(sec);
   const d = Math.floor(s / 86400);
   const h = Math.floor((s % 86400) / 3600);
   const m = Math.floor((s % 3600) / 60);
